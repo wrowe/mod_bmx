@@ -986,33 +986,40 @@ static int bmx_vhost_post_config(apr_pool_t *pconf, apr_pool_t *plog,
     }
 #endif
 
-    /* create a mutex to protect the DBM */
-    rv = apr_global_mutex_create(&dbmlock, dbmlock_fname, APR_LOCK_DEFAULT,
-                                 s->process->pool);
-    if (rv != APR_SUCCESS) {
-        ap_log_error(APLOG_MARK, APLOG_CRIT, rv, s, "Failed to create "
-                     "mod_bmx_vhost global mutex for DBM in file '%s'",
-                     dbmlock_fname);
-        rv = HTTP_INTERNAL_SERVER_ERROR;
-        goto out;
-    }
+    /* Check if this is configtest or a preflight phase, clear nothing,
+     * but create a process-lifespan mutex to protect the DBM. This must
+     * survive graceful restarts (s->process->pool) because two generations
+     * may be manipulating the same DBM at once, so the dbmlock directives
+     * are only recognized at initial startup.
+     * TODO: XXX: Implement httpd 2.4 Mutex schema for global defaults.
+     */
+    apr_pool_userdata_get((void**)&dbmlock, preflight_key, s->process->pool);
+    if (!dbmlock)
+    {
+        /* create a mutex to protect the DBM */
+        rv = apr_global_mutex_create(&dbmlock, dbmlock_fname, APR_LOCK_DEFAULT,
+                                     s->process->pool);
+        if (rv != APR_SUCCESS) {
+            ap_log_error(APLOG_MARK, APLOG_CRIT, rv, s, "Failed to create "
+                         "mod_bmx_vhost global mutex for DBM in file '%s'",
+                         dbmlock_fname);
+            rv = HTTP_INTERNAL_SERVER_ERROR;
+            goto out;
+        }
 
 #ifdef AP_NEED_SET_MUTEX_PERMS
-    rv = unixd_set_global_mutex_perms(dbmlock);
-    if (rv != APR_SUCCESS) {
-        ap_log_error(APLOG_MARK, APLOG_CRIT, rv, s,
-                     "mod_bmx_vhost could not set permissions on global mutex"
-                     " for DBM in file '%s'; check User and Group directives",
-                     dbmlock_fname);
-        rv = HTTP_INTERNAL_SERVER_ERROR;
-        goto out;
-    }
+        rv = unixd_set_global_mutex_perms(dbmlock);
+        if (rv != APR_SUCCESS) {
+            ap_log_error(APLOG_MARK, APLOG_CRIT, rv, s,
+                         "mod_bmx_vhost could not set permissions on global"
+                         " mutex for DBM in file '%s'; check User and Group"
+                         " directives", dbmlock_fname);
+            rv = HTTP_INTERNAL_SERVER_ERROR;
+            goto out;
+        }
 #endif
 
-    /* Check if this is configtest or a preflight phase, clear nothing! */
-    apr_pool_userdata_get(&preflight, preflight_key, s->process->pool);
-    if (!preflight) {
-        apr_pool_userdata_set(preflight_key, preflight_key,
+        apr_pool_userdata_set(dbmlock, preflight_key,
                               apr_pool_cleanup_null, s->process->pool);
         rv = OK;
         goto out;
